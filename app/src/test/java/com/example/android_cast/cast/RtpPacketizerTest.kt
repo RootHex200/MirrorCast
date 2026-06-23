@@ -13,6 +13,15 @@ private class RecordingSender : RtpPacketizer.Sender {
     }
 }
 
+private data class AuCall(val bytes: ByteArray, val endOfAu: Boolean)
+
+private class RecordingAuFramedSender : RtpPacketizer.AuFramedSender {
+    val calls = mutableListOf<AuCall>()
+    override fun send(packet: ByteArray, length: Int, endOfAccessUnit: Boolean) {
+        calls.add(AuCall(packet.copyOf(length), endOfAccessUnit))
+    }
+}
+
 class RtpPacketizerTest {
 
     @Test
@@ -108,6 +117,47 @@ class RtpPacketizerTest {
                 (pkt[11].toInt() and 0xFF)
             assertEquals(0xCAFEBABE.toInt(), ssrc)
         }
+    }
+
+    @Test
+    fun `AU-aware sink marks endOfAccessUnit only on final packet of final NAL`() {
+        val sink = RecordingAuFramedSender()
+        val p = RtpPacketizer(sender = RecordingSender(), mtu = 1400)
+        // SPS + PPS + IDR (3 NALs in one AU)
+        p.sendAccessUnit(
+            listOf(byteArrayOf(0x67, 1), byteArrayOf(0x68, 1), byteArrayOf(0x65, 1, 2, 3)),
+            presentationTimeUs = 0L,
+            sink = sink,
+        )
+        // Each NAL fits in a single packet -> 3 packets, only the last has endOfAu=true.
+        assertEquals(3, sink.calls.size)
+        assertFalse("packet 1 must not mark end", sink.calls[0].endOfAu)
+        assertFalse("packet 2 must not mark end", sink.calls[1].endOfAu)
+        assertTrue("final packet must mark end", sink.calls[2].endOfAu)
+    }
+
+    @Test
+    fun `AU-aware sink marks end on final FU-A fragment only`() {
+        val sink = RecordingAuFramedSender()
+        val p = RtpPacketizer(sender = RecordingSender(), mtu = 100)
+        // Big IDR NAL -> FU-A fragmentation. Only the last fragment carries endOfAu.
+        val bigNal = ByteArray(500) { 0x41.toByte() }
+        p.sendAccessUnit(listOf(bigNal), presentationTimeUs = 0L, sink = sink)
+
+        assertTrue("expected fragmentation", sink.calls.size > 1)
+        for (i in 0 until sink.calls.size - 1) {
+            assertFalse("fragment $i must not mark end", sink.calls[i].endOfAu)
+        }
+        assertTrue("last fragment must mark end", sink.calls.last().endOfAu)
+    }
+
+    @Test
+    fun `Sender SAM stays 2-arg for non-video callers`() {
+        // AAC packetizer relies on the 2-arg Sender; U2 must not break it.
+        val sender = RecordingSender()
+        val aac = AacRtpPacketizer(sender = sender)
+        aac.sendFrame(ByteArray(50) { 0x42 }, presentationTimeUs = 0L)
+        assertTrue("AAC must keep using 2-arg Sender unchanged", sender.packets.isNotEmpty())
     }
 
     private fun timestampOf(pkt: ByteArray): Long {

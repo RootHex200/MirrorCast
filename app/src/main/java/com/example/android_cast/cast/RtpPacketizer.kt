@@ -28,6 +28,15 @@ class RtpPacketizer(
         fun send(packet: ByteArray, length: Int)
     }
 
+    /**
+     * Sink that knows when an access unit ends. Used by the batched pipeline so the
+     * [AccessUnitBatcher] can flush once per AU. The [Sender] interface stays 2-arg so
+     * non-video callers (AAC packetizer, conformance tests) keep working unchanged.
+     */
+    fun interface AuFramedSender {
+        fun send(packet: ByteArray, length: Int, endOfAccessUnit: Boolean)
+    }
+
     private var sequenceNumber: Int = 0
     private var timestampTicks: Long = 0L
 
@@ -40,6 +49,19 @@ class RtpPacketizer(
         }
     }
 
+    /**
+     * AU-aware overload: routes every packet through [sink], marking [endOfAccessUnit=true]
+     * on the final packet of the final NAL (the packet that carries the RTP marker bit).
+     * Use this when the downstream sink batches writes per AU (e.g. [AccessUnitBatcher]).
+     */
+    fun sendAccessUnit(nals: List<ByteArray>, presentationTimeUs: Long, sink: AuFramedSender) {
+        timestampTicks = (presentationTimeUs * clockRateHz) / 1_000_000L
+        for ((idx, nal) in nals.withIndex()) {
+            val isLastNal = idx == nals.lastIndex
+            sendNal(nal, isLastNal, sink)
+        }
+    }
+
     private fun sendNal(nal: ByteArray, isLastInAu: Boolean) {
         if (nal.isEmpty()) return
         if (nal.size <= mtu) {
@@ -49,11 +71,27 @@ class RtpPacketizer(
         }
     }
 
+    private fun sendNal(nal: ByteArray, isLastInAu: Boolean, sink: AuFramedSender) {
+        if (nal.isEmpty()) return
+        if (nal.size <= mtu) {
+            sendSingleNal(nal, isLastInAu, sink)
+        } else {
+            sendFuA(nal, isLastInAu, sink)
+        }
+    }
+
     private fun sendSingleNal(nal: ByteArray, isLastInAu: Boolean) {
         val packet = ByteArray(12 + nal.size)
         writeRtpHeader(packet, payloadType = 96, marker = isLastInAu)
         System.arraycopy(nal, 0, packet, 12, nal.size)
         sender.send(packet, packet.size)
+    }
+
+    private fun sendSingleNal(nal: ByteArray, isLastInAu: Boolean, sink: AuFramedSender) {
+        val packet = ByteArray(12 + nal.size)
+        writeRtpHeader(packet, payloadType = 96, marker = isLastInAu)
+        System.arraycopy(nal, 0, packet, 12, nal.size)
+        sink.send(packet, packet.size, endOfAccessUnit = isLastInAu)
     }
 
     private fun sendFuA(nal: ByteArray, isLastInAu: Boolean) {
@@ -78,6 +116,33 @@ class RtpPacketizer(
             packet[13] = fuHeader.toByte()
             System.arraycopy(nal, offset, packet, 14, take)
             sender.send(packet, packet.size)
+
+            offset += take
+            isFirst = false
+        }
+    }
+
+    private fun sendFuA(nal: ByteArray, isLastInAu: Boolean, sink: AuFramedSender) {
+        val nalHeader = nal[0].toInt() and 0xFF
+        val nalType = nalHeader and 0x1F
+        val nri = nalHeader and 0x60
+        val fuIndicator = (nri or 0x1C).toByte()
+
+        val chunkLen = mtu - 2
+        var offset = 1
+        var isFirst = true
+        while (offset < nal.size) {
+            val take = min(chunkLen, nal.size - offset)
+            val isLast = (offset + take) == nal.size
+            val packet = ByteArray(12 + 2 + take)
+            writeRtpHeader(packet, payloadType = 96, marker = isLastInAu && isLast)
+            packet[12] = fuIndicator
+            var fuHeader = nalType
+            if (isFirst) fuHeader = fuHeader or 0x80
+            if (isLast) fuHeader = fuHeader or 0x40
+            packet[13] = fuHeader.toByte()
+            System.arraycopy(nal, offset, packet, 14, take)
+            sink.send(packet, packet.size, endOfAccessUnit = isLastInAu && isLast)
 
             offset += take
             isFirst = false
