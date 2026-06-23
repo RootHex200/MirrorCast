@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- App Sandbox enabled (matches ENABLE_APP_SANDBOX=YES in project). -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+
+    <!-- Bind TCP 7236 (RTSP listener) for incoming casts. -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <!-- Outbound mDNS / reconnect. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>
