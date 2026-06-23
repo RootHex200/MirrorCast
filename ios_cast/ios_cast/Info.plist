@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Local Network Usage: shown when mDNS / NWListener first touches the LAN. -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>MirrorCast needs local network access to discover your Android device and stream the cast over Wi-Fi. No data leaves your network.</string>
+
+    <!-- Bonjour service types we advertise / browse. -->
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_mirrorcast._tcp</string>
+    </array>
+
+    <!-- Microphone: only required when AAC audio input (issue #5) routes MIC.
+         System audio capture (REMOTE_SUBMIX) does not require this prompt. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>MirrorCast uses the microphone only if you enable audio casting from your Android device.</string>
+</dict>
+</plist>
