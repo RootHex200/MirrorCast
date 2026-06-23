@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
@@ -26,6 +27,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -86,11 +88,7 @@ private fun rememberCastLaunchLauncher(
 
 @Composable
 fun CastScreen(
-    discovery: ReceiverDiscovery = FakeReceiverDiscovery().apply {
-        // 10.0.2.2 is the Android emulator's alias for the host machine's loopback.
-        // Use your Mac's real LAN IP if testing on a physical device instead.
-        emit(Receiver(id = "demo-mac", name = "Demo MacBook", host = "10.0.2.2", port = 7236))
-    },
+    discovery: ReceiverDiscovery = FakeReceiverDiscovery(),
     engine: ScreenCaptureEngine = FakeScreenCaptureEngine(),
     modifier: Modifier = Modifier,
 ) {
@@ -103,6 +101,7 @@ fun CastScreen(
 
     var pendingReceiver by remember { mutableStateOf<Receiver?>(null) }
     var showExplanation by remember { mutableStateOf(false) }
+    var manualIp by remember { mutableStateOf("192.168.0.101") }
 
     val projectionLauncher = rememberCastLaunchLauncher { granted, resultCode, data ->
         val target = pendingReceiver
@@ -176,6 +175,25 @@ fun CastScreen(
             style = MaterialTheme.typography.titleMedium,
         )
 
+        ManualIpRow(
+            ip = manualIp,
+            onIpChange = { manualIp = it },
+            enabled = state is CastState.Idle,
+            onAdd = { ip ->
+                val cleaned = ip.trim()
+                if (cleaned.isNotEmpty()) {
+                    (discovery as? FakeReceiverDiscovery)?.emit(
+                        Receiver(
+                            id = "manual-$cleaned",
+                            name = "Manual: $cleaned",
+                            host = cleaned,
+                            port = 7236,
+                        )
+                    )
+                }
+            },
+        )
+
         ReceiverList(
             receivers = receivers,
             enabled = state is CastState.Idle,
@@ -184,6 +202,33 @@ fun CastScreen(
                 showExplanation = true
             },
         )
+    }
+}
+
+@Composable
+private fun ManualIpRow(
+    ip: String,
+    onIpChange: (String) -> Unit,
+    enabled: Boolean,
+    onAdd: (String) -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        OutlinedTextField(
+            value = ip,
+            onValueChange = onIpChange,
+            label = { Text("Mac IP") },
+            singleLine = true,
+            enabled = enabled,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Button(
+            onClick = { onAdd(ip) },
+            enabled = enabled && ip.isNotBlank(),
+        ) { Text("Add") }
     }
 }
 
