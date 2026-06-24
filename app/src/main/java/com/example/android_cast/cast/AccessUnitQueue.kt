@@ -34,18 +34,23 @@ private data class Pending(
 
 class AccessUnitQueue private constructor(
     private val batcher: AccessUnitBatcher,
+    private val framedSink: RtpPacketizer.AuFramedSender,
     private val channel: Channel<Pending>,
 ) {
 
-    constructor(batcher: AccessUnitBatcher) : this(
+    constructor(
+        batcher: AccessUnitBatcher,
+        framedSink: RtpPacketizer.AuFramedSender,
+    ) : this(
         batcher,
+        framedSink,
         Channel(capacity = 3, onBufferOverflow = BufferOverflow.DROP_OLDEST),
     )
 
     /**
      * Producer entry point. Inspects [au]'s NAL types:
      *  - any NAL is a parameter set (type 7 SPS or type 8 PPS): write through
-     *    to [batcher] synchronously, never queued.
+     *    to [framedSink] synchronously, never queued.
      *  - otherwise: enqueue onto [channel]. DROP_OLDEST if full.
      *
      * Returns true if the AU was accepted (sync bypass or queued); false if
@@ -55,30 +60,23 @@ class AccessUnitQueue private constructor(
         val hasParamSet = au.nals.any { it.isNotEmpty() && ((it[0].toInt() and 0x1F) == 7 || (it[0].toInt() and 0x1F) == 8) }
         if (hasParamSet) {
             // Bypass: write through immediately on the producer thread.
-            packetizer.sendAccessUnit(au.nals, ptsUs, sink = AuFramedSink(batcher))
+            packetizer.sendAccessUnit(au.nals, ptsUs, sink = framedSink)
             return true
         }
         val result = channel.trySend(Pending(au, packetizer, ptsUs))
         return result.isSuccess
     }
 
-    /** Consumer coroutine: drain [channel] and forward each AU to [batcher]. */
+    /** Consumer coroutine: drain [channel] and forward each AU to [framedSink]. */
     suspend fun consume() = coroutineScope {
         for (item in channel) {
-            item.packetizer.sendAccessUnit(item.au.nals, item.ptsUs, sink = AuFramedSink(batcher))
+            item.packetizer.sendAccessUnit(item.au.nals, item.ptsUs, sink = framedSink)
         }
     }
 
     /** Close the channel; the consumer's `for` loop will exit after draining. */
     fun close() {
         channel.close()
-    }
-
-    /** Adapter so [AccessUnitBatcher] can be used as an [RtpPacketizer.AuFramedSender]. */
-    private class AuFramedSink(private val batcher: AccessUnitBatcher) : RtpPacketizer.AuFramedSender {
-        override fun send(packet: ByteArray, length: Int, endOfAccessUnit: Boolean) {
-            batcher.send(packet, length, endOfAccessUnit)
-        }
     }
 
     companion object {

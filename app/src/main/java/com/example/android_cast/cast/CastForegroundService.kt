@@ -97,8 +97,9 @@ class CastForegroundService : Service() {
                 android.util.Log.i("MirrorCast", "RECORD sent, starting encoder")
 
                 // Batched sender: each access unit's RTP packets are 4-byte-interleaved
-                // and accumulated, then flushed to the socket once at AU-end. Was: one
-                // write+flush per RTP packet (100+ syscalls/sec at 1080p/30fps/multi-slice).
+                // (per RTSP TCP framing: $<channel><len-hi><len-lo><payload>) and accumulated,
+                // then flushed to the socket once at AU-end. Was: one write+flush per RTP
+                // packet (100+ syscalls/sec at 1080p/30fps/multi-slice).
                 var framesSent = 0
                 val batcher = AccessUnitBatcher(transport = object : AccessUnitBatcher.Transport {
                     override fun writeAndFlush(bytes: ByteArray) {
@@ -114,10 +115,23 @@ class CastForegroundService : Service() {
                         }
                     }
                 })
-                // Packetizer for the queued path: its sendAccessUnit calls go through the
-                // AuFramedSender (the batcher adapter), which the queue supplies.
-                val packetizer = RtpPacketizer(sender = RtpPacketizer.Sender { _, _ -> /* unused: AU-aware overload is called */ })
-                val queue = AccessUnitQueue(batcher)
+                // Wrap the batcher so each RTP packet from the packetizer gets the 4-byte
+                // RTSP interleaved-frame header before being accumulated.
+                val framedSink = object : RtpPacketizer.AuFramedSender {
+                    override fun send(packet: ByteArray, length: Int, endOfAccessUnit: Boolean) {
+                        val frame = ByteArray(4 + length)
+                        frame[0] = 0x24                              // '$'
+                        frame[1] = channel.toByte()                  // interleaved channel
+                        frame[2] = ((length ushr 8) and 0xFF).toByte()
+                        frame[3] = (length and 0xFF).toByte()
+                        System.arraycopy(packet, 0, frame, 4, length)
+                        batcher.send(frame, frame.size, endOfAccessUnit)
+                    }
+                }
+                // Packetizer used only as a state holder (sequence number, timestamp);
+                // its sendAccessUnit calls route through framedSink, not the 2-arg Sender.
+                val packetizer = RtpPacketizer(sender = RtpPacketizer.Sender { _, _ -> })
+                val queue = AccessUnitQueue(batcher = batcher, framedSink = framedSink)
 
                 val eng = MediaProjectionScreenCaptureEngine(
                     context = applicationContext,

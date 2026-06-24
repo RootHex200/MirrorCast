@@ -22,20 +22,20 @@ class AccessUnitQueueTest {
 
     @Test
     fun `bypass fires synchronously for parameter-set AU`() = runTest {
-        val batcher = RecordingBatcherSink()
-        val queue = AccessUnitQueue(batcher.batcher)
+        val sink = RecordingSink()
+        val queue = AccessUnitQueue(sink.batcher, sink.framed)
         val pkt = RtpPacketizer(sender = NoopSender())
 
         queue.enqueue(paramSetAu(), pkt, ptsUs = 0L)
 
         // Bypass writes immediately — no consumer needed.
-        assertEquals(1, batcher.flushCount)
+        assertEquals(1, sink.flushCount)
     }
 
     @Test
     fun `slice AU goes through the channel and arrives on consumer`() = runTest {
-        val batcher = RecordingBatcherSink()
-        val queue = AccessUnitQueue(batcher.batcher)
+        val sink = RecordingSink()
+        val queue = AccessUnitQueue(sink.batcher, sink.framed)
         val pkt = RtpPacketizer(sender = NoopSender())
 
         val job = launch { queue.consume() }
@@ -47,13 +47,13 @@ class AccessUnitQueueTest {
         queue.close()
         job.join()
 
-        assertEquals(3, batcher.flushCount)
+        assertEquals(3, sink.flushCount)
     }
 
     @Test
     fun `DROP_OLDEST keeps newest at capacity, drops oldest silently`() = runTest {
-        val batcher = RecordingBatcherSink()
-        val queue = AccessUnitQueue(batcher.batcher)
+        val sink = RecordingSink()
+        val queue = AccessUnitQueue(sink.batcher, sink.framed)
         val pkt = RtpPacketizer(sender = NoopSender())
 
         val job = launch { queue.consume() }
@@ -65,26 +65,26 @@ class AccessUnitQueueTest {
 
         // The bypass-free slice AUs all went through DROP_OLDEST channel(cap=3); we must
         // have drained at least the 3 that survived.
-        assertTrue("consumer should have flushed something", batcher.flushCount in 3..10)
+        assertTrue("consumer should have flushed something", sink.flushCount in 3..10)
     }
 
     @Test
     fun `enqueue returns false when channel is closed`() = runTest {
-        val batcher = RecordingBatcherSink()
-        val queue = AccessUnitQueue(batcher.batcher)
+        val sink = RecordingSink()
+        val queue = AccessUnitQueue(sink.batcher, sink.framed)
         val pkt = RtpPacketizer(sender = NoopSender())
 
         queue.close()
         val ok = queue.enqueue(sliceAu(1), pkt, ptsUs = 0L)
 
         assertTrue("closed channel must reject slice AU", !ok)
-        assertEquals(0, batcher.flushCount)
+        assertEquals(0, sink.flushCount)
     }
 
     @Test
     fun `mixed SPS-PPS-IDR AU bypasses queue`() = runTest {
-        val batcher = RecordingBatcherSink()
-        val queue = AccessUnitQueue(batcher.batcher)
+        val sink = RecordingSink()
+        val queue = AccessUnitQueue(sink.batcher, sink.framed)
         val pkt = RtpPacketizer(sender = NoopSender())
 
         // First-frame shape: SPS + PPS + IDR (first byte 0x65 = type 5, not 7/8)
@@ -95,18 +95,23 @@ class AccessUnitQueueTest {
         queue.enqueue(au, pkt, ptsUs = 0L)
 
         // Synchronous bypass even though the AU contains slices — the param-set NALs force bypass.
-        assertEquals(1, batcher.flushCount)
+        assertEquals(1, sink.flushCount)
     }
 }
 
-/** Wraps a real AccessUnitBatcher with a recording transport. */
-private class RecordingBatcherSink {
+/** Wraps a real AccessUnitBatcher + an AuFramedSender that writes into it, with recording. */
+private class RecordingSink {
     val flushes = mutableListOf<ByteArray>()
     val batcher = AccessUnitBatcher(object : AccessUnitBatcher.Transport {
         override fun writeAndFlush(bytes: ByteArray) {
             flushes.add(bytes.copyOf())
         }
     })
+    val framed = object : RtpPacketizer.AuFramedSender {
+        override fun send(packet: ByteArray, length: Int, endOfAccessUnit: Boolean) {
+            batcher.send(packet, length, endOfAccessUnit)
+        }
+    }
     val flushCount: Int get() = flushes.size
 }
 
