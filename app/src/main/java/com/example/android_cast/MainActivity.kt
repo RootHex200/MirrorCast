@@ -101,7 +101,14 @@ fun CastScreen(
 
     var pendingReceiver by remember { mutableStateOf<Receiver?>(null) }
     var showExplanation by remember { mutableStateOf(false) }
-    var manualIp by remember { mutableStateOf("192.168.0.101") }
+    // Auto-default: emulator -> 10.0.2.2 (loopback alias for host Mac),
+    // real device -> last-known Wi-Fi IP (edit if network changes).
+    val isEmulator = remember {
+        (android.os.Build.FINGERPRINT.contains("generic") ||
+            android.os.Build.MODEL.contains("Emulator") ||
+            android.os.Build.PRODUCT.contains("sdk"))
+    }
+    var manualIp by remember { mutableStateOf(if (isEmulator) "10.0.2.2" else "192.168.0.101") }
 
     val projectionLauncher = rememberCastLaunchLauncher { granted, resultCode, data ->
         val target = pendingReceiver
@@ -212,23 +219,42 @@ private fun ManualIpRow(
     enabled: Boolean,
     onAdd: (String) -> Unit,
 ) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        OutlinedTextField(
-            value = ip,
-            onValueChange = onIpChange,
-            label = { Text("Mac IP") },
-            singleLine = true,
-            enabled = enabled,
-            modifier = Modifier.weight(1f),
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Button(
-            onClick = { onAdd(ip) },
-            enabled = enabled && ip.isNotBlank(),
-        ) { Text("Add") }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            OutlinedTextField(
+                value = ip,
+                onValueChange = onIpChange,
+                label = { Text("Mac IP") },
+                singleLine = true,
+                enabled = enabled,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Button(
+                onClick = { onAdd(ip) },
+                enabled = enabled && ip.isNotBlank(),
+            ) { Text("Add") }
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        // Quick toggles for the two most common IPs.
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            TextButton(
+                onClick = { onIpChange("10.0.2.2") },
+                enabled = enabled,
+                modifier = Modifier.weight(1f),
+            ) { Text("Emulator (10.0.2.2)", style = MaterialTheme.typography.labelSmall) }
+            TextButton(
+                onClick = { onIpChange("192.168.0.101") },
+                enabled = enabled,
+                modifier = Modifier.weight(1f),
+            ) { Text("Home Wi-Fi", style = MaterialTheme.typography.labelSmall) }
+        }
     }
 }
 
