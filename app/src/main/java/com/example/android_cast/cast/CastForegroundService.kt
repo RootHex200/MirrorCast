@@ -12,6 +12,10 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.content.getSystemService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 
 /**
  * Foreground service of type `mediaProjection` that owns the live cast session.
@@ -92,26 +96,28 @@ class CastForegroundService : Service() {
                 rtsp.record()
                 android.util.Log.i("MirrorCast", "RECORD sent, starting encoder")
 
+                // Batched sender: each access unit's RTP packets are 4-byte-interleaved
+                // and accumulated, then flushed to the socket once at AU-end. Was: one
+                // write+flush per RTP packet (100+ syscalls/sec at 1080p/30fps/multi-slice).
                 var framesSent = 0
-                val sender = RtpPacketizer.Sender { pkt, len ->
-                    val frame = ByteArray(4 + len)
-                    frame[0] = 0x24
-                    frame[1] = channel.toByte()
-                    frame[2] = ((len ushr 8) and 0xFF).toByte()
-                    frame[3] = (len and 0xFF).toByte()
-                    System.arraycopy(pkt, 0, frame, 4, len)
-                    try {
-                        transport.writeRaw(frame)
-                        framesSent++
-                        if (framesSent % 30 == 1) {
-                            android.util.Log.i("MirrorCast", "sent $framesSent RTP packets")
+                val batcher = AccessUnitBatcher(transport = object : AccessUnitBatcher.Transport {
+                    override fun writeAndFlush(bytes: ByteArray) {
+                        try {
+                            transport.writeRaw(bytes)
+                            framesSent++
+                            if (framesSent % 30 == 1) {
+                                android.util.Log.i("MirrorCast", "flushed $framesSent AUs")
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e("MirrorCast", "write failed after $framesSent AUs", e)
+                            throw e
                         }
-                    } catch (e: Exception) {
-                        android.util.Log.e("MirrorCast", "write failed after $framesSent packets", e)
-                        throw e
                     }
-                }
-                val packetizer = RtpPacketizer(sender = sender)
+                })
+                // Packetizer for the queued path: its sendAccessUnit calls go through the
+                // AuFramedSender (the batcher adapter), which the queue supplies.
+                val packetizer = RtpPacketizer(sender = RtpPacketizer.Sender { _, _ -> /* unused: AU-aware overload is called */ })
+                val queue = AccessUnitQueue(batcher)
 
                 val eng = MediaProjectionScreenCaptureEngine(
                     context = applicationContext,
@@ -119,17 +125,36 @@ class CastForegroundService : Service() {
                     resultData = resultData,
                     onAccessUnit = { nals, pts ->
                         try {
-                            packetizer.sendAccessUnit(nals, pts)
+                            // Enqueue is non-blocking: parameter-set AUs bypass synchronously,
+                            // slice AUs go through the channel with DROP_OLDEST backpressure.
+                            queue.enqueue(AccessUnit(nals, pts), packetizer, ptsUs = pts)
                         } catch (e: Exception) {
-                            android.util.Log.e("MirrorCast", "sendAccessUnit failed (nals=${nals.size} pts=$pts)", e)
+                            android.util.Log.e("MirrorCast", "enqueue failed (nals=${nals.size} pts=$pts)", e)
                         }
                     },
                 )
                 engine = eng
                 android.util.Log.i("MirrorCast", "starting MediaProjection encoder")
                 kotlinx.coroutines.runBlocking {
-                    eng.start(receiver).collect { state ->
-                        android.util.Log.i("MirrorCast", "engine state: $state")
+                    // Consumer coroutine on Dispatchers.IO drains the queue and forwards
+                    // each AU to the batcher. Structured concurrency: when the engine flow
+                    // completes or throws, the runBlocking scope cancels the consumer too.
+                    coroutineScope {
+                        val consumer = launch(Dispatchers.IO) {
+                            try {
+                                queue.consume()
+                            } catch (e: Exception) {
+                                android.util.Log.e("MirrorCast", "consumer ended", e)
+                            }
+                        }
+                        try {
+                            eng.start(receiver).collect { state ->
+                                android.util.Log.i("MirrorCast", "engine state: $state")
+                            }
+                        } finally {
+                            queue.close()
+                            consumer.cancel()
+                        }
                     }
                 }
                 android.util.Log.i("MirrorCast", "engine flow completed")
